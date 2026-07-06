@@ -20,8 +20,10 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 def fetch_live_odds(api_key, sport):
-    # Clé par défaut pour le Tennis ATP ou Ligue 1 pour le foot
-    sport_key = "tennis_atp" if "Tennis" in sport else "soccer_france_ligue1"
+    # Si c'est du tennis on cible l'ATP, sinon on prend les matchs génériques à venir (multisport)
+    sport_key = "tennis_atp" if "Tennis" in sport else "upcoming"
+    
+    # On passe l'endpoint en "générique" si aucun live tennis n'est détecté
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
     params = {
         "apiKey": api_key,
