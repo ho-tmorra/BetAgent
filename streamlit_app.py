@@ -948,8 +948,14 @@ else:
                     return "color: #dc2626; font-weight: 700;"
                 return ""
 
+            styler = picks_display_df.style
+            if hasattr(styler, "map"):
+                styler = styler.map(_style_edge_value, subset=["Edge %"])
+            else:
+                styler = styler.applymap(_style_edge_value, subset=["Edge %"])
+
             st.dataframe(
-                picks_display_df.style.applymap(_style_edge_value, subset=["Edge %"]),
+                styler,
                 use_container_width=True,
             )
 
