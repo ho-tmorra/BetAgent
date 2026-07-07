@@ -7,6 +7,36 @@ import json
 import re
 
 
+SPORT_KEYWORDS = {
+    "Tennis": ["tennis"],
+    "Football": ["soccer", "americanfootball"],
+    "Basketball": ["basketball"],
+    "MMA / Boxe": ["mma", "boxing"],
+    "Hockey": ["icehockey", "hockey"],
+    "Baseball": ["baseball"],
+    "Rugby": ["rugby"],
+    "Cyclisme": ["cycling"],
+    "Esports": ["esports"],
+}
+
+
+def _filter_matches_by_selected_sports(matches, selected_sports):
+    if not selected_sports or "Tous les sports" in selected_sports:
+        return matches
+
+    keywords = []
+    for sport_name in selected_sports:
+        keywords.extend(SPORT_KEYWORDS.get(sport_name, []))
+
+    keywords = list(set(keywords))
+    filtered = []
+    for match in matches:
+        sport_key = str(match.get("sport_key", "")).lower()
+        if any(keyword in sport_key for keyword in keywords):
+            filtered.append(match)
+    return filtered
+
+
 def _extract_h2h_outcomes(match):
     outcomes = []
     for bookmaker in match.get("bookmakers", []):
@@ -539,15 +569,55 @@ tracker_metrics = _compute_tracker_metrics(st.session_state.bet_tracker, float(i
 st.session_state.current_bankroll = float(tracker_metrics["current_bankroll"])
 
 st.sidebar.metric(label="Bankroll Actuelle (€)", value=f"{st.session_state.current_bankroll:.2f} €")
-sport_choice = st.sidebar.selectbox("Marché principal", ["Tous les Lives & À Venir", "Tennis Uniquement"])
+selected_sports = st.sidebar.multiselect(
+    "Sports à inclure",
+    options=["Tous les sports", "Tennis", "Football", "Basketball", "MMA / Boxe", "Hockey", "Baseball", "Rugby", "Cyclisme", "Esports"],
+    default=["Tous les sports"],
+    help="Choisis les sports à scanner. Le cyclisme peut être peu disponible en H2H selon les bookmakers et la période.",
+)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🎛️ Modèle Value & Risque")
-min_edge_pct = st.sidebar.slider("Edge minimum (%)", min_value=0.0, max_value=10.0, value=1.5, step=0.1)
-min_books = st.sidebar.slider("Bookmakers minimum", min_value=1, max_value=8, value=2, step=1)
-top_n_picks = st.sidebar.slider("Nombre de picks", min_value=1, max_value=5, value=3, step=1)
-kelly_fraction_scale = st.sidebar.slider("Kelly fractionné", min_value=0.1, max_value=1.0, value=0.33, step=0.01)
-max_stake_pct = st.sidebar.slider("Mise max (% bankroll)", min_value=1, max_value=15, value=5, step=1)
+min_edge_pct = st.sidebar.slider(
+    "Edge minimum (%)",
+    min_value=0.0,
+    max_value=10.0,
+    value=1.5,
+    step=0.1,
+    help="Edge = avantage estimé vs marché. 2% signifie un bet théoriquement sous-coté de 2%.",
+)
+min_books = st.sidebar.slider(
+    "Bookmakers minimum",
+    min_value=1,
+    max_value=8,
+    value=2,
+    step=1,
+    help="Nombre minimum de bookmakers nécessaires pour valider un prix et éviter les anomalies isolées.",
+)
+top_n_picks = st.sidebar.slider(
+    "Nombre de picks",
+    min_value=1,
+    max_value=5,
+    value=3,
+    step=1,
+    help="Nombre de picks retenus par le moteur quantitatif.",
+)
+kelly_fraction_scale = st.sidebar.slider(
+    "Kelly fractionné",
+    min_value=0.1,
+    max_value=1.0,
+    value=0.33,
+    step=0.01,
+    help="Fraction de Kelly utilisée pour réduire le risque (ex: 0.33 = 1/3 Kelly).",
+)
+max_stake_pct = st.sidebar.slider(
+    "Mise max (% bankroll)",
+    min_value=1,
+    max_value=15,
+    value=5,
+    step=1,
+    help="Plafond de mise par pari en pourcentage de bankroll.",
+)
 
 # --- SCREENER ET RECHERCHE ---
 st.header("🔄 1. Sélectionner et Analyser les Matchs du Jour")
@@ -562,13 +632,15 @@ if st.button("🚀 Lancer le Scanner de Cotes Multi-Bookmakers"):
                 response = requests.get(url, params=params)
                 if response.status_code == 200:
                     all_data = response.json()
-                    filtered_data = [m for m in all_data if "tennis" in m.get("sport_key", "").lower()] if sport_choice == "Tennis Uniquement" else all_data
+                    filtered_data = _filter_matches_by_selected_sports(all_data, selected_sports)
                     
                     # Mémorisation des matchs RÉELS pour le générateur de récap
                     st.session_state.scanned_matches = filtered_data
                     st.session_state.value_candidates = _compute_value_candidates(filtered_data)
                     
                     st.success(f"{len(filtered_data)} matchs trouvés. Utilisez la section ci-dessous pour générer le bilan.")
+                    if "Cyclisme" in selected_sports:
+                        st.caption("ℹ️ Le cyclisme peut avoir peu ou pas de marchés H2H selon les compétitions/bookmakers (ex: Tour de France).")
                     
                     # Rendu rapide des cotes pour info
                     for match in filtered_data[:5]:
@@ -585,11 +657,40 @@ if st.button("🚀 Lancer le Scanner de Cotes Multi-Bookmakers"):
 # --- MODULE QUANT : VALUE + STAKING ---
 st.markdown("---")
 st.header("📈 2. Moteur Value Picks (anti-biais marché)")
+with st.expander("ℹ️ Glossaire rapide (edge, fair odds, CLV, Kelly, ROI)", expanded=False):
+    st.markdown(
+        """
+        - **Edge %**: avantage théorique d'un pari par rapport au prix du marché. Plus il est élevé (et fiable), mieux c'est.
+        - **Market Prob**: probabilité implicite estimée depuis les cotes agrégées des bookmakers.
+        - **Fair Odds**: cote théorique juste calculée depuis la probabilité implicite ($1 / probabilité$).
+        - **CLV %** (*Closing Line Value*): différence entre ta cote prise et la cote de clôture. CLV positif = généralement bon signal long terme.
+        - **Kelly fractionné**: méthode de sizing des mises. On applique seulement une fraction de Kelly pour réduire la volatilité.
+        - **ROI**: retour sur investissement = $PnL / mises$ (sur paris settled).
+        - **Hit Rate**: pourcentage de paris gagnés sur les paris settled.
+        """
+    )
 
 if not st.session_state.scanned_matches:
     st.caption("Lancez d'abord le scanner pour alimenter le moteur quantitatif.")
 else:
+    competition_options = sorted(
+        {
+            str(match.get("sport_title", "")).strip()
+            for match in st.session_state.scanned_matches
+            if str(match.get("sport_title", "")).strip()
+        }
+    )
+    selected_competitions = st.multiselect(
+        "Compétitions à inclure (filtre post-scan)",
+        options=competition_options,
+        default=competition_options,
+        help="Exemples: Wimbledon, Ligue 1, NBA, Tour de France. Le filtre s'applique au moteur de picks sans relancer le scan.",
+    )
+
     candidates_df = pd.DataFrame(st.session_state.value_candidates)
+    if selected_competitions:
+        candidates_df = candidates_df[candidates_df["sport"].isin(selected_competitions)].copy()
+
     if candidates_df.empty:
         st.warning("Aucun candidat exploitable détecté (cotes insuffisantes).")
     else:
