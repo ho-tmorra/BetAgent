@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime
 import json
 import re
+from pathlib import Path
 
 
 SPORT_KEYWORDS = {
@@ -18,6 +19,45 @@ SPORT_KEYWORDS = {
     "Cyclisme": ["cycling"],
     "Esports": ["esports"],
 }
+
+LOCAL_STATE_PATH = Path(__file__).resolve().parent / "betagent_local_state.json"
+
+
+def _load_local_state():
+    try:
+        if LOCAL_STATE_PATH.exists():
+            with LOCAL_STATE_PATH.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        return {}
+    return {}
+
+
+def _save_local_state(payload):
+    try:
+        temp_path = LOCAL_STATE_PATH.with_suffix(".tmp")
+        with temp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        temp_path.replace(LOCAL_STATE_PATH)
+    except Exception:
+        pass
+
+
+def _persist_session_state():
+    payload = {
+        "bet_tracker": st.session_state.get("bet_tracker", []),
+        "current_bankroll": float(st.session_state.get("current_bankroll", 1000.0)),
+        "last_recap": st.session_state.get("last_recap", ""),
+        "monthly_goal_eur": float(st.session_state.get("monthly_goal_eur", 1000.0)),
+    }
+    _save_local_state(payload)
+
+
+def _persist_and_rerun():
+    _persist_session_state()
+    st.rerun()
 
 
 def _filter_matches_by_selected_sports(matches, selected_sports):
@@ -476,7 +516,7 @@ def _norm_text(value):
     return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
-def _find_best_bet_index_for_update(bets, update_item):
+def _find_best_bet_index_for_update(bets, update_item, strict_mode=False):
     target_event = _norm_text(update_item.get("event"))
     target_selection = _norm_text(update_item.get("selection"))
 
@@ -489,6 +529,11 @@ def _find_best_bet_index_for_update(bets, update_item):
     for idx, bet in enumerate(bets):
         bet_event = _norm_text(bet.get("event"))
         bet_selection = _norm_text(bet.get("selection"))
+
+        if strict_mode:
+            if target_event and target_selection and bet_event == target_event and bet_selection == target_selection:
+                return idx
+            continue
 
         selection_match = target_selection and bet_selection and (target_selection in bet_selection or bet_selection in target_selection)
         event_match = target_event and bet_event and (target_event in bet_event or bet_event in target_event)
@@ -555,6 +600,21 @@ if "ocr_preview_bets" not in st.session_state:
     st.session_state.ocr_preview_bets = []
 if "ocr_close_updates_preview" not in st.session_state:
     st.session_state.ocr_close_updates_preview = []
+if "monthly_goal_eur" not in st.session_state:
+    st.session_state.monthly_goal_eur = 1000.0
+
+# Chargement persistance locale (une fois)
+if "local_state_loaded" not in st.session_state:
+    persisted = _load_local_state()
+    if isinstance(persisted.get("bet_tracker"), list):
+        st.session_state.bet_tracker = persisted.get("bet_tracker", [])
+    if isinstance(persisted.get("current_bankroll"), (int, float)):
+        st.session_state.current_bankroll = float(persisted.get("current_bankroll"))
+    if isinstance(persisted.get("last_recap"), str):
+        st.session_state.last_recap = persisted.get("last_recap", "")
+    if isinstance(persisted.get("monthly_goal_eur"), (int, float)):
+        st.session_state.monthly_goal_eur = float(persisted.get("monthly_goal_eur"))
+    st.session_state.local_state_loaded = True
 
 # --- BARRE LATÉRALE ---
 st.sidebar.header("⚙️ Configuration des APIs")
@@ -564,6 +624,14 @@ gemini_api_key = st.sidebar.text_input("Clé Google Gemini", type="password")
 st.sidebar.markdown("---")
 st.sidebar.header("📊 Paramètres Financiers")
 initial_bankroll = st.sidebar.number_input("Bankroll Initiale (€)", min_value=10, value=1000, step=50)
+monthly_goal_eur = st.sidebar.number_input(
+    "Objectif mensuel (€)",
+    min_value=100,
+    value=int(st.session_state.monthly_goal_eur),
+    step=100,
+    help="Objectif de PnL net à atteindre sur le mois en cours.",
+)
+st.session_state.monthly_goal_eur = float(monthly_goal_eur)
 
 tracker_metrics = _compute_tracker_metrics(st.session_state.bet_tracker, float(initial_bankroll))
 st.session_state.current_bankroll = float(tracker_metrics["current_bankroll"])
@@ -618,6 +686,7 @@ max_stake_pct = st.sidebar.slider(
     step=1,
     help="Plafond de mise par pari en pourcentage de bankroll.",
 )
+st.sidebar.caption("💡 Kelly (version simple) : c'est une règle pour doser la mise selon l'avantage estimé. Plus l'avantage est fort, plus la mise peut monter, mais on utilise une fraction (ex: 1/3) pour limiter les swings.")
 
 # --- SCREENER ET RECHERCHE ---
 st.header("🔄 1. Sélectionner et Analyser les Matchs du Jour")
@@ -664,7 +733,7 @@ with st.expander("ℹ️ Glossaire rapide (edge, fair odds, CLV, Kelly, ROI)", e
         - **Market Prob**: probabilité implicite estimée depuis les cotes agrégées des bookmakers.
         - **Fair Odds**: cote théorique juste calculée depuis la probabilité implicite ($1 / probabilité$).
         - **CLV %** (*Closing Line Value*): différence entre ta cote prise et la cote de clôture. CLV positif = généralement bon signal long terme.
-        - **Kelly fractionné**: méthode de sizing des mises. On applique seulement une fraction de Kelly pour réduire la volatilité.
+        - **Kelly fractionné**: règle de mise. Si ton edge est élevé, la mise augmente; si ton edge est faible, la mise baisse. On applique une fraction (ex: 0.33) pour rester prudent.
         - **ROI**: retour sur investissement = $PnL / mises$ (sur paris settled).
         - **Hit Rate**: pourcentage de paris gagnés sur les paris settled.
         """
@@ -687,9 +756,55 @@ else:
         help="Exemples: Wimbledon, Ligue 1, NBA, Tour de France. Le filtre s'applique au moteur de picks sans relancer le scan.",
     )
 
+    c_time_1, c_time_2 = st.columns(2)
+    with c_time_1:
+        time_window = st.selectbox(
+            "Fenêtre temporelle",
+            options=["Toutes dates", "Aujourd'hui", "Prochaines 6h", "Prochaines 24h", "Prochaines 48h", "Prochains 7 jours"],
+            index=0,
+            help="Filtre les picks selon l'heure de début des matchs.",
+        )
+    with c_time_2:
+        upcoming_only = st.checkbox(
+            "Uniquement à venir",
+            value=True,
+            help="Si activé, exclut les matchs déjà commencés.",
+        )
+    st.caption("🕒 Le filtre temporel est calculé en UTC à partir de l'heure de début des marchés.")
+
     candidates_df = pd.DataFrame(st.session_state.value_candidates)
     if selected_competitions:
         candidates_df = candidates_df[candidates_df["sport"].isin(selected_competitions)].copy()
+
+    if not candidates_df.empty:
+        candidates_df["start_dt"] = pd.to_datetime(candidates_df["start"], errors="coerce", utc=True)
+        now_utc = pd.Timestamp.utcnow()
+
+        if upcoming_only:
+            candidates_df = candidates_df[candidates_df["start_dt"].isna() | (candidates_df["start_dt"] >= now_utc)].copy()
+
+        if time_window != "Toutes dates":
+            if time_window == "Aujourd'hui":
+                today_start = now_utc.normalize()
+                today_end = today_start + pd.Timedelta(days=1)
+                candidates_df = candidates_df[
+                    candidates_df["start_dt"].isna()
+                    | ((candidates_df["start_dt"] >= today_start) & (candidates_df["start_dt"] < today_end))
+                ].copy()
+            else:
+                hours_map = {
+                    "Prochaines 6h": 6,
+                    "Prochaines 24h": 24,
+                    "Prochaines 48h": 48,
+                    "Prochains 7 jours": 24 * 7,
+                }
+                max_hours = hours_map.get(time_window)
+                if max_hours is not None:
+                    upper_bound = now_utc + pd.Timedelta(hours=max_hours)
+                    candidates_df = candidates_df[
+                        candidates_df["start_dt"].isna()
+                        | ((candidates_df["start_dt"] >= now_utc) & (candidates_df["start_dt"] <= upper_bound))
+                    ].copy()
 
     if candidates_df.empty:
         st.warning("Aucun candidat exploitable détecté (cotes insuffisantes).")
@@ -723,37 +838,118 @@ else:
             top_candidates["stake_eur"] = stakes
             top_candidates["confidence_score"] = (5 + (top_candidates["edge_pct"] * 0.6)).clip(lower=5, upper=9.5).round(1)
 
-            st.session_state.value_top_picks = top_candidates.to_dict("records")
+            # Personnalisation à la volée : cote réellement jouée chez ton broker
+            top_candidates["my_price"] = top_candidates["best_price"].astype(float)
+
+            editable_view = top_candidates[
+                [
+                    "sport",
+                    "home",
+                    "away",
+                    "selection",
+                    "my_price",
+                    "best_price",
+                    "market_prob",
+                    "fair_odds",
+                    "edge_pct",
+                    "n_books",
+                    "stake_eur",
+                ]
+            ].rename(
+                columns={
+                    "sport": "Sport",
+                    "home": "Home",
+                    "away": "Away",
+                    "selection": "Pick",
+                    "my_price": "Ma Cote",
+                    "best_price": "Best Odds",
+                    "market_prob": "Market Prob",
+                    "fair_odds": "Fair Odds",
+                    "edge_pct": "Edge %",
+                    "n_books": "Books",
+                    "stake_eur": "Stake (€)",
+                }
+            )
+
+            st.info("Tu peux modifier la colonne **Ma Cote** (cote réellement disponible chez ton broker). Les KPI (Edge, confiance, mise) sont recalculés automatiquement.")
+            edited_view = st.data_editor(
+                editable_view,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "Ma Cote": st.column_config.NumberColumn("Ma Cote", min_value=1.01, step=0.01, format="%.2f", help="La cote réelle que tu peux jouer chez ton bookmaker."),
+                    "Best Odds": st.column_config.NumberColumn("Best Odds", disabled=True, format="%.2f"),
+                    "Market Prob": st.column_config.NumberColumn("Market Prob", disabled=True, format="%.3f"),
+                    "Fair Odds": st.column_config.NumberColumn("Fair Odds", disabled=True, format="%.2f"),
+                    "Edge %": st.column_config.NumberColumn("Edge %", disabled=True, format="%.2f"),
+                    "Books": st.column_config.NumberColumn("Books", disabled=True),
+                    "Stake (€)": st.column_config.NumberColumn("Stake (€)", disabled=True, format="%.2f"),
+                },
+            )
+
+            # Recalcule des KPI selon la cote personnalisée
+            recalculated = top_candidates.copy()
+            recalculated["my_price"] = pd.to_numeric(edited_view["Ma Cote"], errors="coerce").fillna(recalculated["best_price"]).clip(lower=1.01)
+            recalculated["edge_pct"] = ((recalculated["my_price"] * recalculated["market_prob"]) - 1.0) * 100.0
+            recalculated["confidence_score"] = (5 + (recalculated["edge_pct"] * 0.6)).clip(lower=3.5, upper=9.5).round(1)
+
+            recalculated_stakes = []
+            for _, row in recalculated.iterrows():
+                kelly_full = _kelly_fraction(float(row["my_price"]), float(row["market_prob"]))
+                kelly_scaled = kelly_full * float(kelly_fraction_scale)
+                stake_eur = min(bankroll * kelly_scaled, max_stake_eur)
+                recalculated_stakes.append(round(max(0.0, stake_eur), 2))
+            recalculated["stake_eur"] = recalculated_stakes
+
+            st.session_state.value_top_picks = recalculated.to_dict("records")
 
             st.subheader("Top picks quantitatifs")
+            picks_display_df = recalculated[
+                [
+                    "sport",
+                    "home",
+                    "away",
+                    "selection",
+                    "my_price",
+                    "best_price",
+                    "market_prob",
+                    "fair_odds",
+                    "edge_pct",
+                    "confidence_score",
+                    "n_books",
+                    "stake_eur",
+                ]
+            ].rename(
+                columns={
+                    "sport": "Sport",
+                    "home": "Home",
+                    "away": "Away",
+                    "selection": "Pick",
+                    "my_price": "Ma Cote",
+                    "best_price": "Best Odds",
+                    "market_prob": "Market Prob",
+                    "fair_odds": "Fair Odds",
+                    "edge_pct": "Edge %",
+                    "confidence_score": "Confiance",
+                    "n_books": "Books",
+                    "stake_eur": "Stake (€)",
+                }
+            )
+
+            def _style_edge_value(value):
+                try:
+                    value = float(value)
+                except Exception:
+                    return ""
+                if value > 0:
+                    return "color: #16a34a; font-weight: 700;"
+                if value < 0:
+                    return "color: #dc2626; font-weight: 700;"
+                return ""
+
             st.dataframe(
-                top_candidates[
-                    [
-                        "sport",
-                        "home",
-                        "away",
-                        "selection",
-                        "best_price",
-                        "market_prob",
-                        "fair_odds",
-                        "edge_pct",
-                        "n_books",
-                        "stake_eur",
-                    ]
-                ].rename(
-                    columns={
-                        "sport": "Sport",
-                        "home": "Home",
-                        "away": "Away",
-                        "selection": "Pick",
-                        "best_price": "Best Odds",
-                        "market_prob": "Market Prob",
-                        "fair_odds": "Fair Odds",
-                        "edge_pct": "Edge %",
-                        "n_books": "Books",
-                        "stake_eur": "Stake (€)",
-                    }
-                ),
+                picks_display_df.style.applymap(_style_edge_value, subset=["Edge %"]),
                 use_container_width=True,
             )
 
@@ -792,7 +988,7 @@ with st.expander("📸 Import depuis screenshot (Winamax / mobile)", expanded=Fa
                 st.session_state.bet_tracker.extend(to_add)
                 st.session_state.ocr_preview_bets = []
                 st.success(f"{len(to_add)} pari(s) importé(s) dans le tracker. Doublons ignorés: {skipped}.")
-                st.rerun()
+                _persist_and_rerun()
 
     if st.session_state.get("ocr_preview_bets"):
         st.dataframe(pd.DataFrame(st.session_state.ocr_preview_bets), use_container_width=True)
@@ -802,6 +998,12 @@ with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", 
         "Ajoute un screenshot de paris clôturés (historique)",
         type=["png", "jpg", "jpeg", "webp"],
         key="screenshot_settled_uploader",
+    )
+
+    strict_update_matching = st.checkbox(
+        "Mode strict (event + sélection exacts)",
+        value=True,
+        help="Activé: mise à jour uniquement si event ET sélection correspondent exactement. Désactivé: matching souple (contains).",
     )
 
     c1, c2 = st.columns(2)
@@ -831,7 +1033,7 @@ with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", 
                 updated = 0
                 unmatched = 0
                 for item in updates:
-                    idx = _find_best_bet_index_for_update(st.session_state.bet_tracker, item)
+                    idx = _find_best_bet_index_for_update(st.session_state.bet_tracker, item, strict_mode=strict_update_matching)
                     if idx is None:
                         unmatched += 1
                         continue
@@ -848,7 +1050,7 @@ with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", 
 
                 st.session_state.ocr_close_updates_preview = []
                 st.success(f"{updated} pari(s) mis à jour. Non appariés: {unmatched}.")
-                st.rerun()
+                _persist_and_rerun()
 
     if st.session_state.get("ocr_close_updates_preview"):
         st.dataframe(pd.DataFrame(st.session_state.ocr_close_updates_preview), use_container_width=True)
@@ -886,7 +1088,7 @@ with st.expander("➕ Ajouter un pari au tracker", expanded=False):
                     }
                 )
                 st.success("Pari ajouté au tracker.")
-                st.rerun()
+                _persist_and_rerun()
 
 if st.session_state.bet_tracker:
     bets_df = _build_tracker_dataframe(st.session_state.bet_tracker)
@@ -906,12 +1108,12 @@ if st.session_state.bet_tracker:
         if st.button("Mettre à jour", use_container_width=True):
             st.session_state.bet_tracker[selected_idx]["status"] = new_status
             st.success("Statut mis à jour.")
-            st.rerun()
+            _persist_and_rerun()
     with c_upd_3:
         if st.button("Supprimer", use_container_width=True):
             st.session_state.bet_tracker.pop(selected_idx)
             st.success("Pari supprimé.")
-            st.rerun()
+            _persist_and_rerun()
 
     tracker_metrics = _compute_tracker_metrics(st.session_state.bet_tracker, float(initial_bankroll))
     st.session_state.current_bankroll = float(tracker_metrics["current_bankroll"])
@@ -926,6 +1128,28 @@ if st.session_state.bet_tracker:
     m4.metric("PnL", f"{tracker_metrics['pnl']:.2f} €")
     m5.metric("Bankroll", f"{tracker_metrics['current_bankroll']:.2f} €")
     m6.metric("CLV moyen", f"{avg_clv:.2f}%")
+
+    month_start = pd.Timestamp(datetime.now().replace(day=1).date())
+    next_month = month_start + pd.offsets.MonthBegin(1)
+    monthly_settled = bets_df[
+        (bets_df["date"] >= month_start)
+        & (bets_df["date"] < next_month)
+        & (bets_df["status"].isin(["won", "lost"]))
+    ].copy()
+    monthly_pnl = float(monthly_settled["PnL (€)"].sum()) if not monthly_settled.empty else 0.0
+    progress_ratio = (monthly_pnl / float(monthly_goal_eur)) if monthly_goal_eur > 0 else 0.0
+    progress_clamped = min(max(progress_ratio, 0.0), 1.0)
+
+    st.subheader("🎯 Progression objectif mensuel")
+    st.progress(progress_clamped)
+    c_goal_1, c_goal_2 = st.columns(2)
+    c_goal_1.metric("PnL du mois", f"{monthly_pnl:.2f} €")
+    c_goal_2.metric("Avancement", f"{progress_ratio * 100:.1f}%")
+    if progress_ratio >= 1:
+        st.success("Objectif mensuel atteint ✅")
+    else:
+        remaining = float(monthly_goal_eur) - monthly_pnl
+        st.caption(f"Reste à faire ce mois: {remaining:.2f} €")
 
     st.subheader("Évolution bankroll")
     settled = bets_df[bets_df["status"].isin(["won", "lost"])].copy()
@@ -955,7 +1179,7 @@ if st.session_state.bet_tracker:
         st.session_state.bet_tracker = []
         st.session_state.current_bankroll = float(initial_bankroll)
         st.success("Tracker réinitialisé.")
-        st.rerun()
+        _persist_and_rerun()
 else:
     st.caption("Aucun pari suivi pour l'instant. Ajoutez votre premier pari ci-dessus.")
 
@@ -1029,9 +1253,12 @@ if st.button("✨ Générer le Récap Clean pour Demain"):
                 
                 response = model.generate_content(prompt_style)
                 st.session_state.last_recap = response.text
-                st.rerun()
+                _persist_and_rerun()
             except Exception as e:
                 st.error(f"Erreur d'IA : {str(e)}")
+
+# Sauvegarde locale opportuniste à chaque exécution complète
+_persist_session_state()
 
 # Affichage du résultat final "prêt à copier"
 if st.session_state.last_recap:
