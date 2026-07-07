@@ -76,12 +76,13 @@ if st.button("✨ Générer le Récap Clean pour Demain"):
         with st.spinner("Rédaction du rapport algorithmique par BetAgent..."):
             try:
                 genai.configure(api_key=gemini_api_key)
-                model = genai.GenerativeModel("gemini-1.5-flash")
+                # Utilisation du modèle stable et mis à jour
+                model = genai.GenerativeModel("gemini-2.5-flash")
                 
                 # Le prompt de cadrage absolu pour copier le style exact des images
                 prompt_style = f"""
                 Tu es 'Agent IA Pronostics'. Tu dois rédiger un résumé de pronostics sportifs destinés à être copiés directement sur un canal Telegram ou WhatsApp de parieurs professionnels.
-                Tu dois adopter EXACTEMENT la structure, le ton et le style visuel suivants, sans fioritures ni bavardages introductifs :
+                Tu devez adopter EXACTEMENT la structure, le ton et le style visuel suivants, sans fioritures ni bavardages introductifs :
 
                 Voici le récap clean pour demain 🎯
 
@@ -110,6 +111,7 @@ if st.button("✨ Générer le Récap Clean pour Demain"):
                 
                 response = model.generate_content(prompt_style)
                 st.session_state.last_recap = response.text
+                st.rerun()
             except Exception as e:
                 st.error(f"Erreur d'IA : {str(e)}")
 
