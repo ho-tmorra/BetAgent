@@ -778,7 +778,7 @@ else:
 
     if not candidates_df.empty:
         candidates_df["start_dt"] = pd.to_datetime(candidates_df["start"], errors="coerce", utc=True)
-        now_utc = pd.Timestamp.utcnow()
+        now_utc = pd.Timestamp.now("UTC")
 
         if upcoming_only:
             candidates_df = candidates_df[candidates_df["start_dt"].isna() | (candidates_df["start_dt"] >= now_utc)].copy()
@@ -874,7 +874,7 @@ else:
             st.info("Tu peux modifier la colonne **Ma Cote** (cote réellement disponible chez ton broker). Les KPI (Edge, confiance, mise) sont recalculés automatiquement.")
             edited_view = st.data_editor(
                 editable_view,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 num_rows="fixed",
                 column_config={
@@ -956,7 +956,7 @@ else:
 
             st.dataframe(
                 styler,
-                use_container_width=True,
+                width="stretch",
             )
 
 # --- TRACKER DE PERFORMANCE ---
@@ -971,7 +971,7 @@ with st.expander("📸 Import depuis screenshot (Winamax / mobile)", expanded=Fa
     )
     c_scan, c_add = st.columns(2)
     with c_scan:
-        if st.button("Analyser le screenshot", use_container_width=True):
+        if st.button("Analyser le screenshot", width="stretch"):
             if uploaded_file is None:
                 st.warning("Ajoute d'abord une image.")
             elif not gemini_api_key:
@@ -985,7 +985,7 @@ with st.expander("📸 Import depuis screenshot (Winamax / mobile)", expanded=Fa
                     except Exception as e:
                         st.error(f"Analyse image impossible: {str(e)}")
     with c_add:
-        if st.button("Importer dans le tracker", use_container_width=True):
+        if st.button("Importer dans le tracker", width="stretch"):
             preview = st.session_state.get("ocr_preview_bets", [])
             if not preview:
                 st.warning("Aucun pari extrait à importer. Lance d'abord l'analyse.")
@@ -997,7 +997,7 @@ with st.expander("📸 Import depuis screenshot (Winamax / mobile)", expanded=Fa
                 _persist_and_rerun()
 
     if st.session_state.get("ocr_preview_bets"):
-        st.dataframe(pd.DataFrame(st.session_state.ocr_preview_bets), use_container_width=True)
+        st.dataframe(pd.DataFrame(st.session_state.ocr_preview_bets), width="stretch")
 
 with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", expanded=False):
     settled_file = st.file_uploader(
@@ -1014,7 +1014,7 @@ with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", 
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Analyser clôture", use_container_width=True):
+        if st.button("Analyser clôture", width="stretch"):
             if settled_file is None:
                 st.warning("Ajoute d'abord une image de paris clôturés.")
             elif not gemini_api_key:
@@ -1029,7 +1029,7 @@ with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", 
                         st.error(f"Analyse impossible: {str(e)}")
 
     with c2:
-        if st.button("Appliquer au tracker", use_container_width=True):
+        if st.button("Appliquer au tracker", width="stretch"):
             updates = st.session_state.get("ocr_close_updates_preview", [])
             if not updates:
                 st.warning("Aucune mise à jour à appliquer. Lance d'abord l'analyse.")
@@ -1059,7 +1059,7 @@ with st.expander("📷 Mise à jour résultats / close odds depuis screenshot", 
                 _persist_and_rerun()
 
     if st.session_state.get("ocr_close_updates_preview"):
-        st.dataframe(pd.DataFrame(st.session_state.ocr_close_updates_preview), use_container_width=True)
+        st.dataframe(pd.DataFrame(st.session_state.ocr_close_updates_preview), width="stretch")
 
 with st.expander("➕ Ajouter un pari au tracker", expanded=False):
     with st.form("add_bet_form"):
@@ -1111,12 +1111,12 @@ if st.session_state.bet_tracker:
     with c_upd_1:
         new_status = st.selectbox("Nouveau statut", ["pending", "won", "lost"], key="tracker_status_update")
     with c_upd_2:
-        if st.button("Mettre à jour", use_container_width=True):
+        if st.button("Mettre à jour", width="stretch"):
             st.session_state.bet_tracker[selected_idx]["status"] = new_status
             st.success("Statut mis à jour.")
             _persist_and_rerun()
     with c_upd_3:
-        if st.button("Supprimer", use_container_width=True):
+        if st.button("Supprimer", width="stretch"):
             st.session_state.bet_tracker.pop(selected_idx)
             st.success("Pari supprimé.")
             _persist_and_rerun()
@@ -1169,7 +1169,7 @@ if st.session_state.bet_tracker:
 
     st.dataframe(
         bets_df[["date", "sport", "event", "selection", "odds", "close_odds", "stake", "status", "PnL (€)", "CLV %"]],
-        use_container_width=True,
+        width="stretch",
     )
 
     csv_data = bets_df.copy()
